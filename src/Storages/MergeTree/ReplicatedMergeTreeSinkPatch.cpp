@@ -1,5 +1,6 @@
 #include <Storages/MergeTree/ReplicatedMergeTreeSinkPatch.h>
 #include <Storages/StorageReplicatedMergeTree.h>
+#include <Storages/MergeTree/MergeTreeDataWriter.h>
 
 namespace DB
 {
@@ -15,6 +16,7 @@ ReplicatedMergeTreeSinkPatch::ReplicatedMergeTreeSinkPatch(
     LightweightUpdateHolderInKeeper update_holder_,
     ContextPtr context_)
     : ReplicatedMergeTreeSink(
+        /*async_insert=*/ false,
         storage_,
         metadata_snapshot_,
         /*quorum=*/ 0,
@@ -42,20 +44,21 @@ void ReplicatedMergeTreeSinkPatch::finishDelayedChunk(const ZooKeeperWithFaultIn
         if (!part->info.isPatch())
             throw Exception(ErrorCodes::LOGICAL_ERROR, "Expected patch part, got part with name: {}", part->name);
 
+        auto deduplication_blocks = partition.block_with_partition.deduplication_info->getBlockIds(partition.block_with_partition.partition_id, deduplicate);
         try
         {
-            bool part_deduplicated = commitPart(zookeeper, part, partition.block_id, false).second;
+            bool part_deduplicated = commitPart(zookeeper, part, deduplication_blocks, false).second;
             if (part_deduplicated)
                 throw Exception(ErrorCodes::LOGICAL_ERROR, "Patch part {} was deduplicated. It's a bug", part->name);
 
             auto counters_snapshot = std::make_shared<ProfileEvents::Counters::Snapshot>(partition.part_counters.getPartiallyAtomicSnapshot());
-            PartLog::addNewPart(storage.getContext(), PartLog::PartLogEntry(part, partition.elapsed_ns, counters_snapshot), {partition.block_id}, ExecutionStatus(0));
+            PartLog::addNewPart(storage.getContext(), PartLog::PartLogEntry(part, partition.elapsed_ns, counters_snapshot), deduplication_blocks, ExecutionStatus(0));
             StorageReplicatedMergeTree::incrementInsertedPartsProfileEvent(part->getType());
         }
         catch (...)
         {
             auto counters_snapshot = std::make_shared<ProfileEvents::Counters::Snapshot>(partition.part_counters.getPartiallyAtomicSnapshot());
-            PartLog::addNewPart(storage.getContext(), PartLog::PartLogEntry(part, partition.elapsed_ns, counters_snapshot), {partition.block_id}, ExecutionStatus::fromCurrentException(__PRETTY_FUNCTION__));
+            PartLog::addNewPart(storage.getContext(), PartLog::PartLogEntry(part, partition.elapsed_ns, counters_snapshot), deduplication_blocks, ExecutionStatus::fromCurrentException(__PRETTY_FUNCTION__));
             throw;
         }
     }
